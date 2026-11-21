@@ -9,6 +9,7 @@ import './config/firebase.js';
 import './config/supabase.js';
 
 import storageRoutes from './routes/storage.routes.js';
+import adminRoutes from './routes/admin.routes.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -50,7 +51,7 @@ app.get('/api/health', (req, res) => {
 });
 
 app.use('/api/storage', storageRoutes);
-
+app.use('/api/admin', adminRoutes);
 // Manejo centralizado de errores.
 app.use((error, req, res, next) => {
   console.error('Error:', error.message);
@@ -61,6 +62,8 @@ app.use((error, req, res, next) => {
       detalle: error.message
     });
   }
+
+
 
   if (error.message === 'Origen no permitido por CORS') {
     return res.status(403).json({

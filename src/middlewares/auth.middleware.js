@@ -12,7 +12,8 @@ export const verificarToken = async (req, res, next) => {
 
     const token = authorization.split(' ')[1];
 
-    const decodedToken = await firebaseAuth.verifyIdToken(token);
+    // Verificar también que el token no haya sido revocado.
+    const decodedToken = await firebaseAuth.verifyIdToken(token, true);
 
     req.usuario = {
       uid: decodedToken.uid,
@@ -25,7 +26,7 @@ export const verificarToken = async (req, res, next) => {
     console.error('Error verificando token:', error.message);
 
     return res.status(401).json({
-      mensaje: 'Token inválido o expirado.'
+      mensaje: 'Token inválido, expirado o revocado.'
     });
   }
 };
