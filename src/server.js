@@ -10,6 +10,8 @@ import './config/supabase.js';
 
 import storageRoutes from './routes/storage.routes.js';
 import adminRoutes from './routes/admin.routes.js';
+import devicesRoutes from './routes/devices.routes.js';
+
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -52,6 +54,8 @@ app.get('/api/health', (req, res) => {
 
 app.use('/api/storage', storageRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/devices', devicesRoutes);
+
 // Manejo centralizado de errores.
 app.use((error, req, res, next) => {
   console.error('Error:', error.message);
