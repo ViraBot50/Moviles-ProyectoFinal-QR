@@ -24,6 +24,21 @@ const tieneAccesoAlDispositivo = (perfil, deviceId) =>
 const puedeProgramar = (perfil) =>
   esAdministrador(perfil) || perfil?.autorizado === true;
 
+const liberarReserva = async (deviceId, scheduleId) => {
+  if (
+    typeof deviceId !== 'string' ||
+    !deviceId.trim() ||
+    typeof scheduleId !== 'string' ||
+    !scheduleId.trim()
+  ) {
+    return;
+  }
+
+  await locksRef.child(deviceId).transaction((actual) =>
+    actual === scheduleId ? null : undefined
+  );
+};
+
 // ======================================================
 // CREAR PROGRAMACIÓN
 // ======================================================
@@ -39,7 +54,7 @@ export const crearProgramacion = async (req, res) => {
 
     if (!normalizarDeviceId(deviceId)) {
       return res.status(400).json({
-        mensaje: 'El identificador del dispositivo no es válido.'
+        mensaje: 'El identificador del dispositivo no es válido.',
       });
     }
 
@@ -48,7 +63,7 @@ export const crearProgramacion = async (req, res) => {
       !/(Z|[+-]\d{2}:\d{2})$/.test(startAt)
     ) {
       return res.status(400).json({
-        mensaje: 'La fecha de inicio debe incluir zona horaria.'
+        mensaje: 'La fecha de inicio debe incluir zona horaria.',
       });
     }
 
@@ -56,13 +71,13 @@ export const crearProgramacion = async (req, res) => {
 
     if (Number.isNaN(fechaInicio.getTime())) {
       return res.status(400).json({
-        mensaje: 'La fecha de inicio no es válida.'
+        mensaje: 'La fecha de inicio no es válida.',
       });
     }
 
     if (fechaInicio.getTime() <= Date.now()) {
       return res.status(400).json({
-        mensaje: 'La hora de inicio debe ser futura.'
+        mensaje: 'La hora de inicio debe ser futura.',
       });
     }
 
@@ -72,7 +87,7 @@ export const crearProgramacion = async (req, res) => {
       durationHours > 12
     ) {
       return res.status(400).json({
-        mensaje: 'La duración debe ser un número entero entre 1 y 12 horas.'
+        mensaje: 'La duración debe ser un número entero entre 1 y 12 horas.',
       });
     }
 
@@ -80,27 +95,29 @@ export const crearProgramacion = async (req, res) => {
 
     if (!perfil) {
       return res.status(404).json({
-        mensaje: 'No se encontró el perfil del usuario.'
+        mensaje: 'No se encontró el perfil del usuario.',
       });
     }
 
     if (!puedeProgramar(perfil)) {
       return res.status(403).json({
-        mensaje: 'Tu cuenta todavía no está autorizada para programar dispositivos.'
+        mensaje: 'Tu cuenta todavía no está autorizada para programar dispositivos.',
       });
     }
 
     if (!tieneAccesoAlDispositivo(perfil, deviceId)) {
       return res.status(403).json({
-        mensaje: 'No tienes vinculado este dispositivo.'
+        mensaje: 'No tienes vinculado este dispositivo.',
       });
     }
 
-    const dispositivoSnapshot = await devicesRef.child(deviceId).once('value');
+    const dispositivoSnapshot = await devicesRef
+      .child(deviceId)
+      .once('value');
 
     if (!dispositivoSnapshot.exists()) {
       return res.status(404).json({
-        mensaje: 'El dispositivo no existe.'
+        mensaje: 'El dispositivo no existe.',
       });
     }
 
@@ -119,7 +136,7 @@ export const crearProgramacion = async (req, res) => {
       duration_hours: durationHours,
       end_at: fechaFin.toISOString(),
       status: 'scheduled',
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
     };
 
     // Reservar el dispositivo de forma atómica.
@@ -135,7 +152,7 @@ export const crearProgramacion = async (req, res) => {
 
     if (!resultado.committed) {
       return res.status(409).json({
-        mensaje: 'Este dispositivo ya tiene una programación pendiente.'
+        mensaje: 'Este dispositivo ya tiene una programación pendiente.',
       });
     }
 
@@ -143,23 +160,19 @@ export const crearProgramacion = async (req, res) => {
       await schedulesRef.child(scheduleId).set(programacion);
     } catch (error) {
       // Liberar la reserva si no se pudo guardar la programación.
-      await lockRef.transaction((actual) =>
-        actual === scheduleId ? null : undefined
-      );
-
+      await liberarReserva(deviceId, scheduleId);
       throw error;
     }
 
     return res.status(201).json({
       mensaje: 'Programación creada correctamente.',
-      programacion
+      programacion,
     });
-
   } catch (error) {
     console.error('Error creando programación:', error);
 
     return res.status(500).json({
-      mensaje: 'No se pudo crear la programación.'
+      mensaje: 'No se pudo crear la programación.',
     });
   }
 };
@@ -174,7 +187,7 @@ export const listarProgramaciones = async (req, res) => {
 
     if (!perfil) {
       return res.status(404).json({
-        mensaje: 'No se encontró el perfil del usuario.'
+        mensaje: 'No se encontró el perfil del usuario.',
       });
     }
 
@@ -186,7 +199,7 @@ export const listarProgramaciones = async (req, res) => {
     const programaciones = Object.entries(datos)
       .map(([scheduleId, datosProgramacion]) => ({
         scheduleId,
-        ...datosProgramacion
+        ...datosProgramacion,
       }))
       .filter((programacion) =>
         esAdmin || programacion.user_id === req.usuario.uid
@@ -196,14 +209,13 @@ export const listarProgramaciones = async (req, res) => {
       );
 
     return res.status(200).json({
-      programaciones
+      programaciones,
     });
-
   } catch (error) {
     console.error('Error listando programaciones:', error);
 
     return res.status(500).json({
-      mensaje: 'No se pudieron consultar las programaciones.'
+      mensaje: 'No se pudieron consultar las programaciones.',
     });
   }
 };
@@ -218,18 +230,18 @@ export const obtenerProgramacion = async (req, res) => {
 
     const [perfil, snapshot] = await Promise.all([
       obtenerPerfil(req.usuario.uid),
-      schedulesRef.child(scheduleId).once('value')
+      schedulesRef.child(scheduleId).once('value'),
     ]);
 
     if (!perfil) {
       return res.status(404).json({
-        mensaje: 'No se encontró el perfil del usuario.'
+        mensaje: 'No se encontró el perfil del usuario.',
       });
     }
 
     if (!snapshot.exists()) {
       return res.status(404).json({
-        mensaje: 'La programación no existe.'
+        mensaje: 'La programación no existe.',
       });
     }
 
@@ -240,20 +252,19 @@ export const obtenerProgramacion = async (req, res) => {
       programacion.user_id !== req.usuario.uid
     ) {
       return res.status(403).json({
-        mensaje: 'No tienes permiso para consultar esta programación.'
+        mensaje: 'No tienes permiso para consultar esta programación.',
       });
     }
 
     return res.status(200).json({
       scheduleId,
-      programacion
+      programacion,
     });
-
   } catch (error) {
     console.error('Error consultando programación:', error);
 
     return res.status(500).json({
-      mensaje: 'No se pudo consultar la programación.'
+      mensaje: 'No se pudo consultar la programación.',
     });
   }
 };
@@ -266,62 +277,92 @@ export const cancelarProgramacion = async (req, res) => {
   try {
     const { scheduleId } = req.params;
 
-    const [perfil, snapshot] = await Promise.all([
-      obtenerPerfil(req.usuario.uid),
-      schedulesRef.child(scheduleId).once('value')
-    ]);
+    const perfil = await obtenerPerfil(req.usuario.uid);
 
     if (!perfil) {
       return res.status(404).json({
-        mensaje: 'No se encontró el perfil del usuario.'
+        mensaje: 'No se encontró el perfil del usuario.',
       });
     }
 
-    if (!snapshot.exists()) {
-      return res.status(404).json({
-        mensaje: 'La programación no existe.'
-      });
-    }
+    const referencia = schedulesRef.child(scheduleId);
 
-    const programacion = snapshot.val();
+    // La transacción evita que una cancelación compita
+    // con el procesamiento de la alerta de vencimiento.
+    const resultado = await referencia.transaction((actual) => {
+      if (!actual) return;
 
-    if (
-      !esAdministrador(perfil) &&
-      programacion.user_id !== req.usuario.uid
-    ) {
-      return res.status(403).json({
-        mensaje: 'No tienes permiso para cancelar esta programación.'
-      });
-    }
+      if (
+        !esAdministrador(perfil) &&
+        actual.user_id !== req.usuario.uid
+      ) {
+        return;
+      }
 
-    if (programacion.status !== 'scheduled') {
-      return res.status(409).json({
-        mensaje: 'Esta programación ya no se encuentra pendiente.'
-      });
-    }
+      if (actual.status !== 'scheduled') return;
 
-    await schedulesRef.child(scheduleId).update({
-      status: 'cancelled',
-      cancelled_at: new Date().toISOString(),
-      cancelled_by: req.usuario.uid
+      if (actual.overdue_alert_status === 'processing') return;
+
+      return {
+        ...actual,
+        status: 'cancelled',
+        cancelled_at: new Date().toISOString(),
+        cancelled_by: req.usuario.uid,
+      };
     });
 
-    // Liberar el dispositivo únicamente si la reserva corresponde
-    // a esta programación.
-    await locksRef.child(programacion.device_id).transaction((actual) =>
-      actual === scheduleId ? null : undefined
-    );
+    if (!resultado.committed) {
+      const actual = resultado.snapshot.val();
+
+      if (!actual) {
+        return res.status(404).json({
+          mensaje: 'La programación no existe.',
+        });
+      }
+
+      if (
+        !esAdministrador(perfil) &&
+        actual.user_id !== req.usuario.uid
+      ) {
+        return res.status(403).json({
+          mensaje: 'No tienes permiso para cancelar esta programación.',
+        });
+      }
+
+      if (actual.overdue_alert_status === 'processing') {
+        return res.status(409).json({
+          mensaje: 'La programación está siendo procesada. Intenta cancelarla nuevamente en unos momentos.',
+        });
+      }
+
+      return res.status(409).json({
+        mensaje: 'Esta programación ya no se encuentra pendiente.',
+      });
+    }
+
+    const programacionCancelada = resultado.snapshot.val();
+
+    try {
+      await liberarReserva(
+        programacionCancelada.device_id,
+        scheduleId
+      );
+    } catch (error) {
+      console.error(
+        'La programación se canceló, pero no se pudo liberar la reserva:',
+        error.message
+      );
+    }
 
     return res.status(200).json({
       mensaje: 'Programación cancelada correctamente.',
-      scheduleId
+      scheduleId,
     });
-
   } catch (error) {
     console.error('Error cancelando programación:', error);
 
     return res.status(500).json({
-      mensaje: 'No se pudo cancelar la programación.'
+      mensaje: 'No se pudo cancelar la programación.',
     });
   }
 };

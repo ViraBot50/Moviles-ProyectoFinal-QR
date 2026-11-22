@@ -1,4 +1,3 @@
-
 import 'dotenv/config';
 
 import express from 'express';
@@ -13,6 +12,11 @@ import storageRoutes from './routes/storage.routes.js';
 import adminRoutes from './routes/admin.routes.js';
 import devicesRoutes from './routes/devices.routes.js';
 import schedulesRoutes from './routes/schedules.routes.js';
+import notificationsRoutes from './routes/notifications.routes.js';
+
+import {
+  iniciarMonitorProgramaciones,
+} from './services/schedule-monitor.service.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -57,6 +61,7 @@ app.use('/api/storage', storageRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/devices', devicesRoutes);
 app.use('/api/schedules', schedulesRoutes);
+app.use('/api/notifications', notificationsRoutes);
 
 // Manejo centralizado de errores.
 app.use((error, req, res, next) => {
@@ -86,4 +91,6 @@ app.listen(PORT, () => {
   console.log('================================');
   console.log(`Servidor: http://localhost:${PORT}`);
   console.log(`Entorno: ${process.env.NODE_ENV}`);
+
+  iniciarMonitorProgramaciones();
 });
