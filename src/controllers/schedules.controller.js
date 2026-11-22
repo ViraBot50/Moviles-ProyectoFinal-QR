@@ -69,6 +69,7 @@ const liberarReserva = async (deviceId, scheduleId) => {
 // CREAR PROGRAMACIÓN
 // ======================================================
 
+
 export const crearProgramacion = async (req, res) => {
   let deviceId;
   let scheduleId;
@@ -76,7 +77,6 @@ export const crearProgramacion = async (req, res) => {
   try {
     const {
       deviceId: idRecibido,
-      startAt,
       durationHours,
     } = req.body;
 
@@ -85,29 +85,6 @@ export const crearProgramacion = async (req, res) => {
     if (!normalizarDeviceId(deviceId)) {
       return res.status(400).json({
         mensaje: 'El identificador del dispositivo no es válido.',
-      });
-    }
-
-    if (
-      typeof startAt !== 'string' ||
-      !/(Z|[+-]\d{2}:\d{2})$/.test(startAt)
-    ) {
-      return res.status(400).json({
-        mensaje: 'La fecha de inicio debe incluir zona horaria.',
-      });
-    }
-
-    const fechaInicio = new Date(startAt);
-
-    if (Number.isNaN(fechaInicio.getTime())) {
-      return res.status(400).json({
-        mensaje: 'La fecha de inicio no es válida.',
-      });
-    }
-
-    if (fechaInicio.getTime() <= Date.now()) {
-      return res.status(400).json({
-        mensaje: 'La hora de inicio debe ser futura.',
       });
     }
 
@@ -155,22 +132,6 @@ export const crearProgramacion = async (req, res) => {
 
     scheduleId = randomUUID();
 
-    const fechaFin = new Date(
-      fechaInicio.getTime() + durationHours * 60 * 60 * 1000
-    );
-
-    const programacion = {
-      schedule_id: scheduleId,
-      device_id: deviceId,
-      user_id: req.usuario.uid,
-      user_email: req.usuario.email,
-      start_at: fechaInicio.toISOString(),
-      duration_hours: durationHours,
-      end_at: fechaFin.toISOString(),
-      status: 'scheduled',
-      created_at: new Date().toISOString(),
-    };
-
     // Reservar el dispositivo de forma atómica.
     const lockRef = locksRef.child(deviceId);
 
@@ -190,16 +151,37 @@ export const crearProgramacion = async (req, res) => {
     }
 
     try {
+      // El inicio se establece en el servidor al confirmar
+      // la reserva, sin depender del reloj del celular.
+      const fechaInicio = new Date();
+
+      const fechaFin = new Date(
+        fechaInicio.getTime() +
+          durationHours * 60 * 60 * 1000
+      );
+
+      const programacion = {
+        schedule_id: scheduleId,
+        device_id: deviceId,
+        user_id: req.usuario.uid,
+        user_email: req.usuario.email,
+        start_at: fechaInicio.toISOString(),
+        duration_hours: durationHours,
+        end_at: fechaFin.toISOString(),
+        status: 'scheduled',
+        created_at: fechaInicio.toISOString(),
+      };
+
       await schedulesRef.child(scheduleId).set(programacion);
+
+      return res.status(201).json({
+        mensaje: 'Dispositivo programado para encendido inmediato.',
+        programacion,
+      });
     } catch (error) {
       await liberarReserva(deviceId, scheduleId);
       throw error;
     }
-
-    return res.status(201).json({
-      mensaje: 'Programación creada correctamente.',
-      programacion,
-    });
   } catch (error) {
     console.error('Error creando programación:', error);
 
@@ -208,6 +190,7 @@ export const crearProgramacion = async (req, res) => {
     });
   }
 };
+
 
 // ======================================================
 // LISTAR PROGRAMACIONES
