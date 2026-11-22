@@ -1,14 +1,13 @@
+
 import { database } from '../config/firebase.js';
 import { enviarAlertaProgramacionVencida } from './notifications.service.js';
 
 const schedulesRef = database.ref('schedules');
-const devicesRef = database.ref('devices');
 const locksRef = database.ref('scheduleLocks');
 
 const INTERVALO_REVISION = 60 * 1000;
 const TOLERANCIA_MINUTOS = 5;
 const ESPERA_ADICIONAL = 30 * 60 * 1000;
-const ESTADO_MAXIMO_ANTIGUEDAD = 2 * 60 * 1000;
 const TIEMPO_RECUPERACION_PROCESO = 2 * 60 * 1000;
 
 let monitorIniciado = false;
@@ -32,6 +31,10 @@ const obtenerFechaRevision = (programacion) => {
   );
 };
 
+// ======================================================
+// LIBERAR RESERVA
+// ======================================================
+
 const liberarReserva = async (deviceId, scheduleId) => {
   if (
     typeof deviceId !== 'string' ||
@@ -47,18 +50,20 @@ const liberarReserva = async (deviceId, scheduleId) => {
   );
 };
 
+// ======================================================
+// FINALIZAR PROGRAMACIÓN SIN ALERTA
+// ======================================================
+
 const finalizarSinAlerta = async (
   scheduleId,
   deviceId,
   motivo,
-  datosAdicionales = {},
 ) => {
   await schedulesRef.child(scheduleId).update({
     status: 'completed',
     overdue_alert_status: motivo,
     overdue_alert_processing_at: null,
     completed_at: new Date().toISOString(),
-    ...datosAdicionales,
   });
 
   await liberarReserva(deviceId, scheduleId);
@@ -67,6 +72,10 @@ const finalizarSinAlerta = async (
     `Programación ${scheduleId}: finalizada sin alerta (${motivo}).`,
   );
 };
+
+// ======================================================
+// RECLAMAR PROGRAMACIÓN
+// ======================================================
 
 const reclamarProgramacion = async (scheduleId) => {
   const referencia = schedulesRef.child(scheduleId);
@@ -81,15 +90,12 @@ const reclamarProgramacion = async (scheduleId) => {
 
     const estadosFinalizados = [
       'sent',
-      'skipped_off',
-      'skipped_unknown',
-      'skipped_unknown_timeout',
       'skipped_no_installations_timeout',
-      'skipped_missing_device',
-      'skipped_invalid_device',
     ];
 
-    if (estadosFinalizados.includes(actual.overdue_alert_status)) {
+    if (
+      estadosFinalizados.includes(actual.overdue_alert_status)
+    ) {
       return;
     }
 
@@ -115,23 +121,14 @@ const reclamarProgramacion = async (scheduleId) => {
   return resultado.committed ? resultado.snapshot.val() : null;
 };
 
-/**
- * Espera una condición necesaria para procesar la alerta.
- *
- * El límite de 30 minutos se cuenta desde el final de la
- * tolerancia inicial de 5 minutos y se comparte entre:
- * - Esperar un estado confiable del dispositivo.
- * - Esperar instalaciones FCM para enviar la notificación.
- */
-const esperarCondicion = async (
+// ======================================================
+// ESPERAR INSTALACIONES FCM
+// ======================================================
+
+const esperarInstalaciones = async (
   scheduleId,
   programacion,
   deviceId,
-  {
-    estadoEspera,
-    motivoTimeout,
-    mensaje,
-  },
 ) => {
   const fechaRevision = obtenerFechaRevision(programacion);
 
@@ -141,9 +138,8 @@ const esperarCondicion = async (
     );
   }
 
-  const fechaInicioEspera =
-    obtenerFecha(programacion.overdue_alert_wait_started_at) ??
-    fechaRevision;
+  // El plazo comienza después de los 5 minutos de tolerancia.
+  const fechaInicioEspera = fechaRevision;
 
   const fechaLimite =
     fechaInicioEspera.getTime() + ESPERA_ADICIONAL;
@@ -154,11 +150,7 @@ const esperarCondicion = async (
     await finalizarSinAlerta(
       scheduleId,
       deviceId,
-      motivoTimeout,
-      {
-        overdue_alert_wait_started_at: fechaInicioEspera.toISOString(),
-        overdue_alert_wait_finished_at: new Date(ahora).toISOString(),
-      },
+      'skipped_no_installations_timeout',
     );
 
     return;
@@ -168,18 +160,22 @@ const esperarCondicion = async (
     !programacion.overdue_alert_wait_started_at;
 
   await schedulesRef.child(scheduleId).update({
-    overdue_alert_status: estadoEspera,
+    overdue_alert_status: 'waiting_recipients',
     overdue_alert_wait_started_at: fechaInicioEspera.toISOString(),
     overdue_alert_processing_at: null,
   });
 
   if (primeraEspera) {
     console.log(
-      `Programación ${scheduleId}: ${mensaje} ` +
-      'Se revisará cada minuto durante un máximo de 30 minutos.',
+      `Programación ${scheduleId}: no hay instalaciones FCM disponibles. ` +
+      'Se esperarán hasta 30 minutos para enviar la alerta.',
     );
   }
 };
+
+// ======================================================
+// PROCESAR PROGRAMACIÓN VENCIDA
+// ======================================================
 
 const procesarProgramacion = async (scheduleId) => {
   const programacion = await reclamarProgramacion(scheduleId);
@@ -202,60 +198,8 @@ const procesarProgramacion = async (scheduleId) => {
       return;
     }
 
-    const dispositivoSnapshot = await devicesRef
-      .child(deviceId)
-      .once('value');
-
-    if (!dispositivoSnapshot.exists()) {
-      await finalizarSinAlerta(
-        scheduleId,
-        deviceId,
-        'skipped_missing_device',
-      );
-
-      return;
-    }
-
-    const dispositivo = dispositivoSnapshot.val();
-
-    const estado = dispositivo.power_state;
-    const ultimaActualizacion = obtenerFecha(
-      dispositivo.last_state_update,
-    );
-
-    const ahora = Date.now();
-
-    const estadoConfiable =
-      (estado === 'on' || estado === 'off') &&
-      ultimaActualizacion !== null &&
-      ahora - ultimaActualizacion.getTime() >= 0 &&
-      ahora - ultimaActualizacion.getTime() <=
-        ESTADO_MAXIMO_ANTIGUEDAD;
-
-    if (!estadoConfiable) {
-      await esperarCondicion(
-        scheduleId,
-        programacion,
-        deviceId,
-        {
-          estadoEspera: 'waiting_state',
-          motivoTimeout: 'skipped_unknown_timeout',
-          mensaje: 'esperando un estado confiable del dispositivo.',
-        },
-      );
-
-      return;
-    }
-
-    if (estado === 'off') {
-      await finalizarSinAlerta(
-        scheduleId,
-        deviceId,
-        'skipped_off',
-      );
-
-      return;
-    }
+    // Ya no consultamos power_state ni last_state_update.
+    // La programación activa es suficiente para procesar la alerta.
 
     const resultado = await enviarAlertaProgramacionVencida({
       ...programacion,
@@ -263,22 +207,18 @@ const procesarProgramacion = async (scheduleId) => {
     });
 
     // No hay instalaciones FCM registradas.
-    // Se conserva la reserva y se espera hasta el límite compartido.
+    // Esperar hasta 30 minutos después de la tolerancia.
     if (resultado.total === 0) {
-      await esperarCondicion(
+      await esperarInstalaciones(
         scheduleId,
         programacion,
         deviceId,
-        {
-          estadoEspera: 'waiting_recipients',
-          motivoTimeout: 'skipped_no_installations_timeout',
-          mensaje: 'esperando instalaciones FCM para enviar la alerta.',
-        },
       );
 
       return;
     }
 
+    // Si algún envío falla, se reintentará en la siguiente revisión.
     if (
       resultado.fallidos > 0 ||
       resultado.enviados === 0
@@ -325,6 +265,10 @@ const procesarProgramacion = async (scheduleId) => {
   }
 };
 
+// ======================================================
+// REPARAR RESERVAS DE PROGRAMACIONES FINALIZADAS
+// ======================================================
+
 const repararReservasFinalizadas = async (
   scheduleId,
   programacion,
@@ -346,6 +290,10 @@ const repararReservasFinalizadas = async (
     );
   }
 };
+
+// ======================================================
+// REVISAR PROGRAMACIONES
+// ======================================================
 
 const revisarProgramaciones = async () => {
   if (revisionEnCurso) return;
@@ -378,6 +326,10 @@ const revisarProgramaciones = async () => {
     revisionEnCurso = false;
   }
 };
+
+// ======================================================
+// INICIAR MONITOR
+// ======================================================
 
 export const iniciarMonitorProgramaciones = () => {
   if (monitorIniciado) return;

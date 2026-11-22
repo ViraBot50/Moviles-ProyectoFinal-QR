@@ -1,35 +1,28 @@
-
+import { randomUUID } from 'node:crypto';
 import { database } from '../config/firebase.js';
-import { enviarAlertaProgramacionVencida } from './notifications.service.js';
 
 const schedulesRef = database.ref('schedules');
+const devicesRef = database.ref('devices');
+const usersRef = database.ref('users');
 const locksRef = database.ref('scheduleLocks');
 
-const INTERVALO_REVISION = 60 * 1000;
-const TOLERANCIA_MINUTOS = 5;
-const ESPERA_ADICIONAL = 30 * 60 * 1000;
-const TIEMPO_RECUPERACION_PROCESO = 2 * 60 * 1000;
+const normalizarDeviceId = (id) =>
+  typeof id === 'string' &&
+  /^[0-9A-F]{12}$/.test(id);
 
-let monitorIniciado = false;
-let revisionEnCurso = false;
-
-const obtenerFecha = (valor) => {
-  if (typeof valor !== 'string') return null;
-
-  const fecha = new Date(valor);
-
-  return Number.isNaN(fecha.getTime()) ? null : fecha;
+const obtenerPerfil = async (uid) => {
+  const snapshot = await usersRef.child(uid).once('value');
+  return snapshot.val();
 };
 
-const obtenerFechaRevision = (programacion) => {
-  const fechaFin = obtenerFecha(programacion.end_at);
+const esAdministrador = (perfil) => perfil?.role === 'admin';
 
-  if (!fechaFin) return null;
+const tieneAccesoAlDispositivo = (perfil, deviceId) =>
+  esAdministrador(perfil) ||
+  perfil?.dispositivos_vinculados?.[deviceId] === true;
 
-  return new Date(
-    fechaFin.getTime() + TOLERANCIA_MINUTOS * 60 * 1000,
-  );
-};
+const puedeProgramar = (perfil) =>
+  esAdministrador(perfil) || perfil?.autorizado === true;
 
 // ======================================================
 // LIBERAR RESERVA
@@ -45,306 +38,386 @@ const liberarReserva = async (deviceId, scheduleId) => {
     return;
   }
 
-  await locksRef.child(deviceId).transaction((actual) =>
-    actual === scheduleId ? null : undefined,
-  );
-};
+  const referencia = locksRef.child(deviceId);
 
-// ======================================================
-// FINALIZAR PROGRAMACIÓN SIN ALERTA
-// ======================================================
+  // Leer primero la reserva actual.
+  const lecturaInicial = await referencia.once('value');
+  const reservaInicial = lecturaInicial.val();
 
-const finalizarSinAlerta = async (
-  scheduleId,
-  deviceId,
-  motivo,
-) => {
-  await schedulesRef.child(scheduleId).update({
-    status: 'completed',
-    overdue_alert_status: motivo,
-    overdue_alert_processing_at: null,
-    completed_at: new Date().toISOString(),
-  });
-
-  await liberarReserva(deviceId, scheduleId);
-
-  console.log(
-    `Programación ${scheduleId}: finalizada sin alerta (${motivo}).`,
-  );
-};
-
-// ======================================================
-// RECLAMAR PROGRAMACIÓN
-// ======================================================
-
-const reclamarProgramacion = async (scheduleId) => {
-  const referencia = schedulesRef.child(scheduleId);
-  const ahora = Date.now();
-
-  const resultado = await referencia.transaction((actual) => {
-    if (!actual || actual.status !== 'scheduled') return;
-
-    const fechaRevision = obtenerFechaRevision(actual);
-
-    if (!fechaRevision || ahora < fechaRevision.getTime()) return;
-
-    const estadosFinalizados = [
-      'sent',
-      'skipped_no_installations_timeout',
-    ];
-
-    if (
-      estadosFinalizados.includes(actual.overdue_alert_status)
-    ) {
-      return;
-    }
-
-    if (actual.overdue_alert_status === 'processing') {
-      const inicioProceso = Date.parse(
-        actual.overdue_alert_processing_at ?? '',
-      );
-
-      const procesoVigente =
-        Number.isFinite(inicioProceso) &&
-        ahora - inicioProceso < TIEMPO_RECUPERACION_PROCESO;
-
-      if (procesoVigente) return;
-    }
-
-    return {
-      ...actual,
-      overdue_alert_status: 'processing',
-      overdue_alert_processing_at: new Date(ahora).toISOString(),
-    };
-  });
-
-  return resultado.committed ? resultado.snapshot.val() : null;
-};
-
-// ======================================================
-// ESPERAR INSTALACIONES FCM
-// ======================================================
-
-const esperarInstalaciones = async (
-  scheduleId,
-  programacion,
-  deviceId,
-) => {
-  const fechaRevision = obtenerFechaRevision(programacion);
-
-  if (!fechaRevision) {
-    throw new Error(
-      'La programación no tiene una fecha de finalización válida.',
-    );
-  }
-
-  // El plazo comienza después de los 5 minutos de tolerancia.
-  const fechaInicioEspera = fechaRevision;
-
-  const fechaLimite =
-    fechaInicioEspera.getTime() + ESPERA_ADICIONAL;
-
-  const ahora = Date.now();
-
-  if (ahora >= fechaLimite) {
-    await finalizarSinAlerta(
-      scheduleId,
-      deviceId,
-      'skipped_no_installations_timeout',
-    );
-
+  // No modificar una reserva que pertenezca a otra programación.
+  if (reservaInicial !== scheduleId) {
     return;
   }
 
-  const primeraEspera =
-    !programacion.overdue_alert_wait_started_at;
+  let primeraEjecucion = true;
 
-  await schedulesRef.child(scheduleId).update({
-    overdue_alert_status: 'waiting_recipients',
-    overdue_alert_wait_started_at: fechaInicioEspera.toISOString(),
-    overdue_alert_processing_at: null,
+  await referencia.transaction((actual) => {
+    const reservaActual =
+      actual ?? (primeraEjecucion ? reservaInicial : null);
+
+    primeraEjecucion = false;
+
+    if (reservaActual === scheduleId) {
+      return null;
+    }
+
+    return;
   });
-
-  if (primeraEspera) {
-    console.log(
-      `Programación ${scheduleId}: no hay instalaciones FCM disponibles. ` +
-      'Se esperarán hasta 30 minutos para enviar la alerta.',
-    );
-  }
 };
 
 // ======================================================
-// PROCESAR PROGRAMACIÓN VENCIDA
+// CREAR PROGRAMACIÓN
 // ======================================================
 
-const procesarProgramacion = async (scheduleId) => {
-  const programacion = await reclamarProgramacion(scheduleId);
 
-  if (!programacion) return;
-
-  const deviceId = programacion.device_id;
+export const crearProgramacion = async (req, res) => {
+  let deviceId;
+  let scheduleId;
 
   try {
-    if (
-      typeof deviceId !== 'string' ||
-      !deviceId.trim()
-    ) {
-      await finalizarSinAlerta(
-        scheduleId,
-        null,
-        'skipped_invalid_device',
-      );
+    const {
+      deviceId: idRecibido,
+      durationHours,
+    } = req.body;
 
-      return;
-    }
+    deviceId = idRecibido;
 
-    // Ya no consultamos power_state ni last_state_update.
-    // La programación activa es suficiente para procesar la alerta.
-
-    const resultado = await enviarAlertaProgramacionVencida({
-      ...programacion,
-      schedule_id: scheduleId,
-    });
-
-    // No hay instalaciones FCM registradas.
-    // Esperar hasta 30 minutos después de la tolerancia.
-    if (resultado.total === 0) {
-      await esperarInstalaciones(
-        scheduleId,
-        programacion,
-        deviceId,
-      );
-
-      return;
-    }
-
-    // Si algún envío falla, se reintentará en la siguiente revisión.
-    if (
-      resultado.fallidos > 0 ||
-      resultado.enviados === 0
-    ) {
-      throw new Error(
-        'Hay notificaciones pendientes o no se pudieron completar los envíos.',
-      );
-    }
-
-    const fechaCompletado = new Date().toISOString();
-
-    await schedulesRef.child(scheduleId).update({
-      status: 'completed',
-      overdue_alert_status: 'sent',
-      overdue_alert_sent_at: fechaCompletado,
-      overdue_alert_processing_at: null,
-      completed_at: fechaCompletado,
-    });
-
-    await liberarReserva(deviceId, scheduleId);
-
-    console.log(
-      `Programación ${scheduleId}: alerta enviada correctamente.`,
-    );
-  } catch (error) {
-    console.error(
-      `Error procesando programación ${scheduleId}:`,
-      error.message,
-    );
-
-    const referencia = schedulesRef.child(scheduleId);
-    const snapshot = await referencia.once('value');
-    const actual = snapshot.val();
-
-    if (
-      actual?.status === 'scheduled' &&
-      actual.overdue_alert_status === 'processing'
-    ) {
-      await referencia.update({
-        overdue_alert_status: 'pending',
-        overdue_alert_processing_at: null,
+    if (!normalizarDeviceId(deviceId)) {
+      return res.status(400).json({
+        mensaje: 'El identificador del dispositivo no es válido.',
       });
     }
-  }
-};
 
-// ======================================================
-// REPARAR RESERVAS DE PROGRAMACIONES FINALIZADAS
-// ======================================================
+    if (
+      !Number.isInteger(durationHours) ||
+      durationHours < 1 ||
+      durationHours > 12
+    ) {
+      return res.status(400).json({
+        mensaje:
+          'La duración debe ser un número entero entre 1 y 12 horas.',
+      });
+    }
 
-const repararReservasFinalizadas = async (
-  scheduleId,
-  programacion,
-) => {
-  if (
-    !['completed', 'cancelled'].includes(programacion?.status)
-  ) {
-    return;
-  }
+    const perfil = await obtenerPerfil(req.usuario.uid);
 
-  if (!programacion.device_id) return;
+    if (!perfil) {
+      return res.status(404).json({
+        mensaje: 'No se encontró el perfil del usuario.',
+      });
+    }
 
-  try {
-    await liberarReserva(programacion.device_id, scheduleId);
-  } catch (error) {
-    console.error(
-      `No se pudo reparar la reserva de ${scheduleId}:`,
-      error.message,
-    );
-  }
-};
+    if (!puedeProgramar(perfil)) {
+      return res.status(403).json({
+        mensaje:
+          'Tu cuenta todavía no está autorizada para programar dispositivos.',
+      });
+    }
 
-// ======================================================
-// REVISAR PROGRAMACIONES
-// ======================================================
+    if (!tieneAccesoAlDispositivo(perfil, deviceId)) {
+      return res.status(403).json({
+        mensaje: 'No tienes vinculado este dispositivo.',
+      });
+    }
 
-const revisarProgramaciones = async () => {
-  if (revisionEnCurso) return;
+    const dispositivoSnapshot = await devicesRef
+      .child(deviceId)
+      .once('value');
 
-  revisionEnCurso = true;
+    if (!dispositivoSnapshot.exists()) {
+      return res.status(404).json({
+        mensaje: 'El dispositivo no existe.',
+      });
+    }
 
-  try {
-    const snapshot = await schedulesRef.once('value');
-    const programaciones = snapshot.val() ?? {};
+    scheduleId = randomUUID();
 
-    for (const [scheduleId, programacion] of Object.entries(
-      programaciones,
-    )) {
-      if (programacion?.status === 'scheduled') {
-        await procesarProgramacion(scheduleId);
-        continue;
+    // Reservar el dispositivo de forma atómica.
+    const lockRef = locksRef.child(deviceId);
+
+    const resultado = await lockRef.transaction((actual) => {
+      if (actual !== null) {
+        return;
       }
 
-      await repararReservasFinalizadas(
-        scheduleId,
-        programacion,
+      return scheduleId;
+    });
+
+    if (!resultado.committed) {
+      return res.status(409).json({
+        mensaje:
+          'Este dispositivo ya tiene una programación pendiente.',
+      });
+    }
+
+    try {
+      // El inicio se establece en el servidor al confirmar
+      // la reserva, sin depender del reloj del celular.
+      const fechaInicio = new Date();
+
+      const fechaFin = new Date(
+        fechaInicio.getTime() +
+          durationHours * 60 * 60 * 1000
       );
+
+      const programacion = {
+        schedule_id: scheduleId,
+        device_id: deviceId,
+        user_id: req.usuario.uid,
+        user_email: req.usuario.email,
+        start_at: fechaInicio.toISOString(),
+        duration_hours: durationHours,
+        end_at: fechaFin.toISOString(),
+        status: 'scheduled',
+        created_at: fechaInicio.toISOString(),
+      };
+
+      await schedulesRef.child(scheduleId).set(programacion);
+
+      return res.status(201).json({
+        mensaje: 'Dispositivo programado para encendido inmediato.',
+        programacion,
+      });
+    } catch (error) {
+      await liberarReserva(deviceId, scheduleId);
+      throw error;
     }
   } catch (error) {
-    console.error(
-      'Error revisando programaciones:',
-      error.message,
-    );
-  } finally {
-    revisionEnCurso = false;
+    console.error('Error creando programación:', error);
+
+    return res.status(500).json({
+      mensaje: 'No se pudo crear la programación.',
+    });
   }
 };
 
+
 // ======================================================
-// INICIAR MONITOR
+// LISTAR PROGRAMACIONES
 // ======================================================
 
-export const iniciarMonitorProgramaciones = () => {
-  if (monitorIniciado) return;
 
-  monitorIniciado = true;
 
-  console.log(
-    'Monitor de programaciones iniciado. Revisión cada minuto.',
-  );
+export const listarProgramaciones = async (req, res) => {
+  try {
+    const perfil = await obtenerPerfil(req.usuario.uid);
 
-  void revisarProgramaciones();
+    if (!perfil) {
+      return res.status(404).json({
+        mensaje: 'No se encontró el perfil del usuario.',
+      });
+    }
 
-  const intervalo = setInterval(() => {
-    void revisarProgramaciones();
-  }, INTERVALO_REVISION);
+    const snapshot = await schedulesRef.once('value');
+    const datos = snapshot.val() || {};
 
-  intervalo.unref();
+    const esAdmin = esAdministrador(perfil);
+
+    const programaciones = Object.entries(datos)
+      .map(([firebaseKey, datosProgramacion]) => ({
+        ...datosProgramacion,
+        scheduleId: firebaseKey,
+      }))
+      .filter((programacion) =>
+        esAdmin ||
+        tieneAccesoAlDispositivo(
+          perfil,
+          programacion.device_id
+        )
+      )
+      .sort((a, b) =>
+        new Date(a.start_at) - new Date(b.start_at)
+      );
+
+    return res.status(200).json({
+      programaciones,
+    });
+  } catch (error) {
+    console.error('Error listando programaciones:', error);
+
+    return res.status(500).json({
+      mensaje: 'No se pudieron consultar las programaciones.',
+    });
+  }
+};
+
+
+// ======================================================
+// CONSULTAR UNA PROGRAMACIÓN
+// ======================================================
+
+
+export const obtenerProgramacion = async (req, res) => {
+  try {
+    const { scheduleId } = req.params;
+
+    const [perfil, snapshot] = await Promise.all([
+      obtenerPerfil(req.usuario.uid),
+      schedulesRef.child(scheduleId).once('value'),
+    ]);
+
+    if (!perfil) {
+      return res.status(404).json({
+        mensaje: 'No se encontró el perfil del usuario.',
+      });
+    }
+
+    if (!snapshot.exists()) {
+      return res.status(404).json({
+        mensaje: 'La programación no existe.',
+      });
+    }
+
+    const programacion = snapshot.val();
+
+    if (
+      !tieneAccesoAlDispositivo(
+        perfil,
+        programacion.device_id
+      )
+    ) {
+      return res.status(403).json({
+        mensaje: 'No tienes permiso para consultar esta programación.',
+      });
+    }
+
+    return res.status(200).json({
+      scheduleId,
+      programacion,
+    });
+  } catch (error) {
+    console.error('Error consultando programación:', error);
+
+    return res.status(500).json({
+      mensaje: 'No se pudo consultar la programación.',
+    });
+  }
+};
+
+
+// ======================================================
+// CANCELAR PROGRAMACIÓN
+// ======================================================
+
+export const cancelarProgramacion = async (req, res) => {
+  try {
+    const { scheduleId } = req.params;
+
+    const perfil = await obtenerPerfil(req.usuario.uid);
+
+    if (!perfil) {
+      return res.status(404).json({
+        mensaje: 'No se encontró el perfil del usuario.',
+      });
+    }
+
+    const referencia = schedulesRef.child(scheduleId);
+
+    // Obtener el registro antes de iniciar la transacción.
+    const lecturaInicial = await referencia.once('value');
+
+    if (!lecturaInicial.exists()) {
+      return res.status(404).json({
+        mensaje: 'La programación no existe.',
+      });
+    }
+
+    // Respaldo para la primera ejecución de la transacción,
+    // cuando Firebase todavía puede proporcionar null.
+    let primeraEjecucion = true;
+
+    const resultado = await referencia.transaction((actual) => {
+      const programacionActual =
+        actual ??
+        (primeraEjecucion ? lecturaInicial.val() : null);
+
+      primeraEjecucion = false;
+
+      if (!programacionActual) {
+        return;
+      }
+
+      if (
+        !esAdministrador(perfil) &&
+        programacionActual.user_id !== req.usuario.uid
+      ) {
+        return;
+      }
+
+      if (programacionActual.status !== 'scheduled') {
+        return;
+      }
+
+      if (
+        programacionActual.overdue_alert_status === 'processing'
+      ) {
+        return;
+      }
+
+      return {
+        ...programacionActual,
+        status: 'cancelled',
+        cancelled_at: new Date().toISOString(),
+        cancelled_by: req.usuario.uid,
+      };
+    });
+
+    if (!resultado.committed) {
+      const actual = resultado.snapshot.val();
+
+      if (!actual) {
+        return res.status(404).json({
+          mensaje: 'La programación no existe.',
+        });
+      }
+
+      if (
+        !esAdministrador(perfil) &&
+        actual.user_id !== req.usuario.uid
+      ) {
+        return res.status(403).json({
+          mensaje:
+            'No tienes permiso para cancelar esta programación.',
+        });
+      }
+
+      if (actual.overdue_alert_status === 'processing') {
+        return res.status(409).json({
+          mensaje:
+            'La programación está siendo procesada. Intenta cancelarla nuevamente en unos momentos.',
+        });
+      }
+
+      return res.status(409).json({
+        mensaje: 'Esta programación ya no se encuentra pendiente.',
+      });
+    }
+
+    const programacionCancelada = resultado.snapshot.val();
+
+    // Liberar la reserva únicamente si todavía pertenece
+    // a la programación que acabamos de cancelar.
+    try {
+      await liberarReserva(
+        programacionCancelada.device_id,
+        scheduleId
+      );
+    } catch (error) {
+      console.error(
+        'La programación se canceló, pero no se pudo liberar la reserva:',
+        error.message
+      );
+    }
+
+    return res.status(200).json({
+      mensaje: 'Programación cancelada correctamente.',
+      scheduleId,
+    });
+  } catch (error) {
+    console.error('Error cancelando programación:', error);
+
+    return res.status(500).json({
+      mensaje: 'No se pudo cancelar la programación.',
+    });
+  }
 };
