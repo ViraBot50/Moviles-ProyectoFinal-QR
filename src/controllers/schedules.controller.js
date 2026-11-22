@@ -286,7 +286,15 @@ export const cancelarProgramacion = async (req, res) => {
     }
 
     const referencia = schedulesRef.child(scheduleId);
+    const lecturaDebug = await referencia.once('value');
 
+console.log('[DEBUG CANCELACIÓN]', {
+  scheduleId,
+  referencia: referencia.toString(),
+  existe: lecturaDebug.exists(),
+  status: lecturaDebug.child('status').val(),
+  database: database.ref().toString(),
+});
     // La transacción evita que una cancelación compita
     // con el procesamiento de la alerta de vencimiento.
     const resultado = await referencia.transaction((actual) => {
