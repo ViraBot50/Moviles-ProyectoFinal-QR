@@ -64,7 +64,15 @@ router.delete(
 // FOTOGRAFÍAS DE SALONES
 // ======================================================
 
-// Subir fotografía: administrador.
+// Obtener URL: cualquier usuario autenticado.
+// IMPORTANTE: debe estar antes de /salons/:salonId.
+router.post(
+  '/salons/url',
+  verificarToken,
+  obtenerUrlFotoSalon
+);
+
+// Subir fotografía: solo administradores.
 router.post(
   '/salons/:salonId',
   verificarToken,
@@ -73,19 +81,13 @@ router.post(
   subirFotoSalon
 );
 
-// Obtener URL: cualquier usuario autenticado.
-router.post(
-  '/salons/url',
-  verificarToken,
-  obtenerUrlFotoSalon
-);
-
-// Eliminar fotografía: administrador.
+// Eliminar fotografía: solo administradores.
 router.delete(
   '/salons',
   verificarToken,
   verificarAdmin,
   eliminarFotoSalon
 );
+
 
 export default router;
