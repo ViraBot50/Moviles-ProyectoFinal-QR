@@ -298,27 +298,50 @@ console.log('[DEBUG CANCELACIÓN]', {
     // La transacción evita que una cancelación compita
     // con el procesamiento de la alerta de vencimiento.
     const resultado = await referencia.transaction((actual) => {
-      if (!actual) return;
+  console.log('[DEBUG TRANSACCIÓN]', {
+    existe: actual !== null,
+    userIdProgramacion: actual?.user_id ?? null,
+    userIdSesion: req.usuario.uid,
+    esAdministrador: esAdministrador(perfil),
+    status: actual?.status ?? null,
+    overdueAlertStatus: actual?.overdue_alert_status ?? null,
+  });
 
-      if (
-        !esAdministrador(perfil) &&
-        actual.user_id !== req.usuario.uid
-      ) {
-        return;
-      }
+  if (!actual) return;
 
-      if (actual.status !== 'scheduled') return;
+  if (
+    !esAdministrador(perfil) &&
+    actual.user_id !== req.usuario.uid
+  ) {
+    console.log('[DEBUG] Cancelación rechazada: usuario diferente.');
+    return;
+  }
 
-      if (actual.overdue_alert_status === 'processing') return;
+  if (actual.status !== 'scheduled') {
+    console.log('[DEBUG] Cancelación rechazada: estado diferente.');
+    return;
+  }
 
-      return {
-        ...actual,
-        status: 'cancelled',
-        cancelled_at: new Date().toISOString(),
-        cancelled_by: req.usuario.uid,
-      };
-    });
+  if (actual.overdue_alert_status === 'processing') {
+    console.log('[DEBUG] Cancelación rechazada: alerta procesándose.');
+    return;
+  }
 
+  console.log('[DEBUG] Transacción autorizada para cancelar.');
+
+  return {
+    ...actual,
+    status: 'cancelled',
+    cancelled_at: new Date().toISOString(),
+    cancelled_by: req.usuario.uid,
+  };
+});
+
+console.log('[DEBUG RESULTADO TRANSACCIÓN]', {
+  committed: resultado.committed,
+  existe: resultado.snapshot.exists(),
+  status: resultado.snapshot.child('status').val(),
+});
     if (!resultado.committed) {
       const actual = resultado.snapshot.val();
 
