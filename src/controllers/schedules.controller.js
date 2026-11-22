@@ -196,6 +196,8 @@ export const crearProgramacion = async (req, res) => {
 // LISTAR PROGRAMACIONES
 // ======================================================
 
+
+
 export const listarProgramaciones = async (req, res) => {
   try {
     const perfil = await obtenerPerfil(req.usuario.uid);
@@ -217,7 +219,11 @@ export const listarProgramaciones = async (req, res) => {
         scheduleId: firebaseKey,
       }))
       .filter((programacion) =>
-        esAdmin || programacion.user_id === req.usuario.uid
+        esAdmin ||
+        tieneAccesoAlDispositivo(
+          perfil,
+          programacion.device_id
+        )
       )
       .sort((a, b) =>
         new Date(a.start_at) - new Date(b.start_at)
@@ -235,9 +241,11 @@ export const listarProgramaciones = async (req, res) => {
   }
 };
 
+
 // ======================================================
 // CONSULTAR UNA PROGRAMACIÓN
 // ======================================================
+
 
 export const obtenerProgramacion = async (req, res) => {
   try {
@@ -263,8 +271,10 @@ export const obtenerProgramacion = async (req, res) => {
     const programacion = snapshot.val();
 
     if (
-      !esAdministrador(perfil) &&
-      programacion.user_id !== req.usuario.uid
+      !tieneAccesoAlDispositivo(
+        perfil,
+        programacion.device_id
+      )
     ) {
       return res.status(403).json({
         mensaje: 'No tienes permiso para consultar esta programación.',
@@ -283,6 +293,7 @@ export const obtenerProgramacion = async (req, res) => {
     });
   }
 };
+
 
 // ======================================================
 // CANCELAR PROGRAMACIÓN
