@@ -1,3 +1,4 @@
+
 import { randomUUID } from 'node:crypto';
 import { database } from '../config/firebase.js';
 
@@ -48,7 +49,11 @@ export const crearProgramacion = async (req, res) => {
   let scheduleId;
 
   try {
-    const { deviceId: idRecibido, startAt, durationHours } = req.body;
+    const {
+      deviceId: idRecibido,
+      startAt,
+      durationHours,
+    } = req.body;
 
     deviceId = idRecibido;
 
@@ -87,7 +92,8 @@ export const crearProgramacion = async (req, res) => {
       durationHours > 12
     ) {
       return res.status(400).json({
-        mensaje: 'La duración debe ser un número entero entre 1 y 12 horas.',
+        mensaje:
+          'La duración debe ser un número entero entre 1 y 12 horas.',
       });
     }
 
@@ -101,7 +107,8 @@ export const crearProgramacion = async (req, res) => {
 
     if (!puedeProgramar(perfil)) {
       return res.status(403).json({
-        mensaje: 'Tu cuenta todavía no está autorizada para programar dispositivos.',
+        mensaje:
+          'Tu cuenta todavía no está autorizada para programar dispositivos.',
       });
     }
 
@@ -152,14 +159,14 @@ export const crearProgramacion = async (req, res) => {
 
     if (!resultado.committed) {
       return res.status(409).json({
-        mensaje: 'Este dispositivo ya tiene una programación pendiente.',
+        mensaje:
+          'Este dispositivo ya tiene una programación pendiente.',
       });
     }
 
     try {
       await schedulesRef.child(scheduleId).set(programacion);
     } catch (error) {
-      // Liberar la reserva si no se pudo guardar la programación.
       await liberarReserva(deviceId, scheduleId);
       throw error;
     }
@@ -286,62 +293,56 @@ export const cancelarProgramacion = async (req, res) => {
     }
 
     const referencia = schedulesRef.child(scheduleId);
-    const lecturaDebug = await referencia.once('value');
 
-console.log('[DEBUG CANCELACIÓN]', {
-  scheduleId,
-  referencia: referencia.toString(),
-  existe: lecturaDebug.exists(),
-  status: lecturaDebug.child('status').val(),
-  database: database.ref().toString(),
-});
-    // La transacción evita que una cancelación compita
-    // con el procesamiento de la alerta de vencimiento.
+    // Obtener el registro antes de iniciar la transacción.
+    const lecturaInicial = await referencia.once('value');
+
+    if (!lecturaInicial.exists()) {
+      return res.status(404).json({
+        mensaje: 'La programación no existe.',
+      });
+    }
+
+    // Respaldo para la primera ejecución de la transacción,
+    // cuando Firebase todavía puede proporcionar null.
+    let primeraEjecucion = true;
+
     const resultado = await referencia.transaction((actual) => {
-  console.log('[DEBUG TRANSACCIÓN]', {
-    existe: actual !== null,
-    userIdProgramacion: actual?.user_id ?? null,
-    userIdSesion: req.usuario.uid,
-    esAdministrador: esAdministrador(perfil),
-    status: actual?.status ?? null,
-    overdueAlertStatus: actual?.overdue_alert_status ?? null,
-  });
+      const programacionActual =
+        actual ??
+        (primeraEjecucion ? lecturaInicial.val() : null);
 
-  if (!actual) return;
+      primeraEjecucion = false;
 
-  if (
-    !esAdministrador(perfil) &&
-    actual.user_id !== req.usuario.uid
-  ) {
-    console.log('[DEBUG] Cancelación rechazada: usuario diferente.');
-    return;
-  }
+      if (!programacionActual) {
+        return;
+      }
 
-  if (actual.status !== 'scheduled') {
-    console.log('[DEBUG] Cancelación rechazada: estado diferente.');
-    return;
-  }
+      if (
+        !esAdministrador(perfil) &&
+        programacionActual.user_id !== req.usuario.uid
+      ) {
+        return;
+      }
 
-  if (actual.overdue_alert_status === 'processing') {
-    console.log('[DEBUG] Cancelación rechazada: alerta procesándose.');
-    return;
-  }
+      if (programacionActual.status !== 'scheduled') {
+        return;
+      }
 
-  console.log('[DEBUG] Transacción autorizada para cancelar.');
+      if (
+        programacionActual.overdue_alert_status === 'processing'
+      ) {
+        return;
+      }
 
-  return {
-    ...actual,
-    status: 'cancelled',
-    cancelled_at: new Date().toISOString(),
-    cancelled_by: req.usuario.uid,
-  };
-});
+      return {
+        ...programacionActual,
+        status: 'cancelled',
+        cancelled_at: new Date().toISOString(),
+        cancelled_by: req.usuario.uid,
+      };
+    });
 
-console.log('[DEBUG RESULTADO TRANSACCIÓN]', {
-  committed: resultado.committed,
-  existe: resultado.snapshot.exists(),
-  status: resultado.snapshot.child('status').val(),
-});
     if (!resultado.committed) {
       const actual = resultado.snapshot.val();
 
@@ -356,13 +357,15 @@ console.log('[DEBUG RESULTADO TRANSACCIÓN]', {
         actual.user_id !== req.usuario.uid
       ) {
         return res.status(403).json({
-          mensaje: 'No tienes permiso para cancelar esta programación.',
+          mensaje:
+            'No tienes permiso para cancelar esta programación.',
         });
       }
 
       if (actual.overdue_alert_status === 'processing') {
         return res.status(409).json({
-          mensaje: 'La programación está siendo procesada. Intenta cancelarla nuevamente en unos momentos.',
+          mensaje:
+            'La programación está siendo procesada. Intenta cancelarla nuevamente en unos momentos.',
         });
       }
 
@@ -373,6 +376,8 @@ console.log('[DEBUG RESULTADO TRANSACCIÓN]', {
 
     const programacionCancelada = resultado.snapshot.val();
 
+    // Liberar la reserva únicamente si todavía pertenece
+    // a la programación que acabamos de cancelar.
     try {
       await liberarReserva(
         programacionCancelada.device_id,
