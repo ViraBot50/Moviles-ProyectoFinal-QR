@@ -197,9 +197,9 @@ export const listarProgramaciones = async (req, res) => {
     const esAdmin = esAdministrador(perfil);
 
     const programaciones = Object.entries(datos)
-      .map(([scheduleId, datosProgramacion]) => ({
-        scheduleId,
+      .map(([firebaseKey, datosProgramacion]) => ({
         ...datosProgramacion,
+        scheduleId: firebaseKey,
       }))
       .filter((programacion) =>
         esAdmin || programacion.user_id === req.usuario.uid
