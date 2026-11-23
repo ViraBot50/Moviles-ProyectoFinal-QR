@@ -1,4 +1,3 @@
-
 import { createHash } from 'node:crypto';
 import { database, messaging } from '../config/firebase.js';
 
@@ -94,7 +93,7 @@ export const eliminarToken = async (req, res) => {
 };
 
 // ============================================================
-// NOTIFICAR NUEVO REPORTE EXCLUSIVAMENTE A ADMINISTRADORES
+// NOTIFICAR NUEVO REPORTE A LOS ADMINISTRADORES
 // ============================================================
 
 export const notificarNuevoReporte = async (req, res) => {
@@ -111,7 +110,7 @@ export const notificarNuevoReporte = async (req, res) => {
       });
     }
 
-    // Verificar que sea un profesor autorizado.
+    // Verificar que el usuario exista y esté autorizado.
     const usuarioSnapshot = await database
       .ref(`users/${uid}`)
       .once('value');
@@ -120,7 +119,7 @@ export const notificarNuevoReporte = async (req, res) => {
 
     if (
       !usuario ||
-      usuario.role !== 'user' ||
+      !['user', 'admin'].includes(usuario.role) ||
       usuario.autorizado !== true
     ) {
       return res.status(403).json({
@@ -139,7 +138,7 @@ export const notificarNuevoReporte = async (req, res) => {
       });
     }
 
-    // Comprobar que pertenezca al profesor autenticado.
+    // Comprobar que pertenezca al usuario autenticado.
     if (reporte.user_id !== uid) {
       return res.status(403).json({
         mensaje: 'No puedes notificar un reporte de otro usuario.'
@@ -155,22 +154,27 @@ export const notificarNuevoReporte = async (req, res) => {
     // Evitar notificaciones duplicadas.
     if (reporte.notificacion_enviada === true) {
       return res.status(200).json({
-        mensaje: 'La notificación de este reporte ya fue enviada.'
+        mensaje: 'La notificación de este reporte ya fue enviada.',
+        notificacionesEnviadas: 0
       });
     }
 
-    // Obtener usuarios.
+    // Obtener todos los usuarios.
     const usuariosSnapshot = await database
       .ref('users')
       .once('value');
 
     const usuarios = usuariosSnapshot.val() || {};
 
-    // Recopilar FID exclusivamente de administradores.
+    // Recopilar instalaciones de otros administradores.
     const instalaciones = [];
 
     for (const [adminUid, admin] of Object.entries(usuarios)) {
       if (admin?.role !== 'admin') continue;
+      if (admin.autorizado !== true) continue;
+
+      // Un administrador no recibe la notificación de su propio reporte.
+      if (adminUid === uid) continue;
 
       const registros = admin.fcm_installations || {};
 
@@ -199,7 +203,9 @@ export const notificarNuevoReporte = async (req, res) => {
 
     if (instalacionesUnicas.length === 0) {
       return res.status(200).json({
-        mensaje: 'Reporte registrado. No hay administradores con instalaciones activas.',
+        mensaje: usuario.role === 'admin'
+          ? 'Reporte registrado. No hay otros administradores con instalaciones activas.'
+          : 'Reporte registrado. No hay administradores con instalaciones activas.',
         notificacionesEnviadas: 0
       });
     }
